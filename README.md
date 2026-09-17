@@ -1,208 +1,478 @@
-# Automated Code Review Tool — Java Spring Boot Backend with ML-assisted Code Analysis
+# ReviewForge Java
 
-The **Automated Code Review Tool** is a multi-service code review platform designed to analyze pull requests, detect software anti-patterns, calculate code quality metrics, and automate developer feedback loops.
+ReviewForge Java is an automated code-review platform built around a **Java 21 + Spring Boot** backend.
 
-The central core of the system is a **Java 21 + Spring Boot** application acting as the primary control plane and API gateway, orchestrating data storage, security, GitHub webhooks, and asynchronous communication with a specialized Python/FastAPI Machine Learning inference worker.
+The project analyzes source-code changes, detects common software anti-patterns, stores review results, and integrates with GitHub. The Java backend acts as the main application layer, while a Python/FastAPI service provides code-analysis and optional CodeBERT-based classification.
+
+## Main Technologies
+
+### Java Backend
+- Java 21
+- Spring Boot 3.3.4
+- Spring Security
+- Spring Data JPA
+- PostgreSQL
+- Redis
+- Flyway
+- Maven
+- JWT authentication
+- GitHub OAuth and webhooks
+- JUnit 5 and Testcontainers
+
+### Supporting Components
+- Python + FastAPI — code-analysis worker
+- CodeBERT-compatible model pipeline
+- Next.js + TypeScript — web dashboard
+- GitHub Action — pull-request integration
+- VS Code extension — editor integration
+- Docker Compose — local deployment
 
 ---
 
-## Architectural Overview
-
-The platform uses a decoupled microservice architecture where Java Spring Boot orchestrates all business logic and external integrations:
-
-- **Java 21 & Spring Boot (Central Control Plane & Backend)**:
-  - Exposes secured REST APIs for dashboards, extensions, and CI pipelines.
-  - Implements Spring Security authentication, JWT/API-key authentication, endpoint authorization, rate limiting, and repository ownership checks.
-  - Manages GitHub lifecycle integrations: webhook ingestion, HMAC signature verification, pull request diff parsing, status checks, and inline review comments.
-  - Controls repository management, review scheduling, and data ingestion pipelines.
-  - Manages relational persistence in **PostgreSQL** using Spring Data JPA with versioned schema migrations managed by **Flyway**.
-  - Coordinates Redis-backed token blacklisting and outbox worker state.
-  - Dispatches code hunks to the ML worker and aggregates review findings.
-- **Next.js Dashboard (Frontend)**:
-  - React, TypeScript, and TailwindCSS interface for repository monitoring, PR quality trends, anti-pattern breakdowns, and API key management.
-- **Python ML Worker (Inference Engine & Model Pipeline)**:
-  - Dedicated FastAPI service used for unified-diff and hunk parsing, secret redaction, rule-based pattern detection, and transformer-based code classification (CodeBERT).
-- **Client Integrations**:
-  - **GitHub Action**: Automates CI PR reviews with quality-score gating.
-  - **VS Code Extension**: Real-time in-editor anti-pattern diagnostics via the Spring Boot API.
+## Project Architecture
 
 ```text
-GitHub Webhook / Action / VS Code / Next.js Dashboard
-                         |
-                         v
-      +-------------------------------------+
-      |   Spring Boot Backend (Java 21)     |
-      |   - REST API & Security (JWT / Key) |
-      |   - GitHub Webhook & Diff Ingestion |
-      |   - Review & Outbox Orchestration   |
-      +-------------------------------------+
-             |                 |
-             v                 v
-   PostgreSQL 16 + Redis   FastAPI ML Worker (Python)
-                               |
-                      localized diff hunks
-                               |
-                    +----------+----------+
-                    |                     |
-                    v                     v
-              CodeBERT Model       Rule-based Fallback
+GitHub / VS Code / Web Dashboard
+              |
+              v
++--------------------------------+
+| Java 21 + Spring Boot Backend  |
+| REST API                       |
+| Authentication & Security      |
+| GitHub Integration             |
+| Review Orchestration           |
++---------------+----------------+
+                |
+        +-------+-------+
+        |               |
+        v               v
+ PostgreSQL + Redis   FastAPI Worker
+                          |
+                          v
+               Rule-based Detection
+                    or CodeBERT
 ```
 
----
-
-## Java Backend
-
-The primary Java application is located in [`apps/api/`](apps/api/) and follows standard Maven and Spring Boot conventions:
+The **Java Spring Boot application is the main backend** and is located in:
 
 ```text
 apps/api/
-├── pom.xml                                   # Maven dependencies, plugins, test profiles
-└── src/
-    ├── main/
-    │   ├── java/com/automatedcodereviewtool/ # Core Java source code
-    │   └── resources/                        # application.yml, Flyway SQL migrations
-    └── test/
-        ├── java/com/automatedcodereviewtool/ # JUnit 5 unit, slice, and integration tests
-        └── resources/                        # Test configurations & H2 migration scripts
 ```
 
-### Core Java Packages
-
-The Java backend adheres to clear separation of concerns across its package hierarchy:
-
-| Package | Purpose & Responsibilities |
-| --- | --- |
-| `config` | Spring configuration beans: WebClient timeouts, Redis caching, CORS policies, async executor pools, and Resilience4j circuit breakers. |
-| `controller` | REST controllers exposing versioned endpoints for scans (`/api/scan`), pull request reviews (`/api/reviews`), repositories (`/api/repos`), API keys (`/api/keys`), system metrics (`/api/metrics`), and webhooks (`/api/webhook`). |
-| `dto` | Strongly-typed request/response data transfer objects, validated with Jakarta Bean Validation (`@NotNull`, `@NotBlank`, `@Size`). |
-| `entity` | JPA domain models mapped to PostgreSQL tables: `Repository`, `PullRequestEntity`, `SampleReview`, `Finding`, `CodeSample`, `ApiKey`, `ProcessedWebhook`, `IngestionOutbox`, `User`, `Annotation`, `AntiPattern`, `DatasetItem`, `DatasetVersion`, `PredictionEvent`, and `QualityMetric`. |
-| `exception` | Domain-specific exception hierarchy (`ConnectRepoException`, `InvalidDiffException`, `MlWorkerException`) and framework exceptions (`EntityNotFoundException`, `ResponseStatusException`) handled globally by `GlobalExceptionHandler` (`@RestControllerAdvice`). |
-| `repository` | Spring Data JPA repositories with custom transactional queries, row-level locking (`SELECT FOR UPDATE`), and pagination support. |
-| `security` | Authentication filter chains, JWT validation (`JwtAuthFilter`), API key authentication (`ApiKeyAuthFilter`), IP rate limiting (`AuthRateLimitFilter`), and cryptographic utilities (`EncryptionService`). |
-| `service` | Core business logic layer coordinating GitHub interactions (`GitHubService`), review workflows (`ReviewService`), ML worker HTTP client (`MlWorkerService`), and outbox publishing (`OutboxProcessor`). |
-| `webhook` | GitHub webhook ingress processor: validates HMAC-SHA256 signatures, deduplicates deliveries, and triggers async review pipelines. |
-
-### Architectural Data Flow
-
-1. **Controller Layer → Service Layer → Repository Layer → PostgreSQL**:
-   Requests entering the Spring Boot application are validated in the controllers, processed within transactional boundaries in the service layer, and persisted to PostgreSQL using Spring Data JPA and Flyway versioned schemas.
-2. **GitHub → Spring Boot API → ML Worker → Review Result**:
-   When a pull request webhook or scan request arrives, the Java API verifies signatures, fetches the raw unified diff, redacts secrets, delegates code hunk classification to the FastAPI ML worker, computes overall quality scores, and records findings in PostgreSQL while optionally commenting back onto the GitHub pull request.
+It handles API requests, authentication, repository management, GitHub webhooks, persistence, review processing, security, and communication with the code-analysis worker.
 
 ---
 
-## Production & Machine Learning Status
+## Repository Structure
 
-| Capability | Current State | Notes |
-| --- | --- | --- |
-| Primary Production Detector | Deterministic rule-based engine | Rule-based/regex detection over parsed diff hunks. |
-| CodeBERT Checkpoint | Supported, not bundled in Git | CodeBERT-compatible inference is supported, but a model checkpoint is not bundled in Git and the default deployment operates in fallback mode unless a compatible checkpoint is explicitly configured. |
-| Fallback Operation | Default (`MODEL_NAME=none`) | System operates fully on deterministic rule-based detection when no ML checkpoint is configured. |
-| Dataset Ingestion | Database outbox & contract validation | Hunks are normalized, redacted, and versioned before ingestion. |
-
-The repository contains transformer training and inference code, but does not claim unverified performance benchmarks. A model must satisfy explicit dataset contracts, baseline comparisons, and deployment smoke tests before promotion.
-
----
-
-## Repository Layout
-
-| Path | Purpose |
-| --- | --- |
-| `apps/api/` | Java 21 + Spring Boot control plane and PostgreSQL migrations |
-| `apps/ml-worker/` | Python FastAPI inference service and CodeBERT lifecycle pipeline |
-| `apps/web/` | Next.js / TypeScript dashboard frontend |
-| `apps/vscode-ext/` | VS Code extension client |
-| `github-action/` | GitHub Action integration for pull-request CI |
-| `contracts/` | Shared JSON contract fixtures for cross-service parity tests |
-| `taxonomy/` | Concrete anti-pattern taxonomy specification (`anti_patterns.yaml`) |
-| `infra/docker-compose.yml` | Full-stack local development environment |
-| `render.yaml` | Production deployment blueprint |
+```text
+reviewforge-java/
+│
+├── apps/
+│   ├── api/              # Java 21 + Spring Boot backend
+│   ├── ml-worker/        # Python/FastAPI analysis service
+│   ├── web/              # Next.js dashboard
+│   └── vscode-ext/       # VS Code extension
+│
+├── contracts/            # Shared cross-service test fixtures
+├── github-action/        # GitHub Action integration
+├── infra/                # Docker Compose configuration
+├── scripts/              # Utility/database scripts
+├── taxonomy/             # Anti-pattern definitions
+├── .env.example          # Example environment configuration
+├── render.yaml           # Deployment configuration
+└── README.md
+```
 
 ---
 
-## Local Full Stack Setup
+# Running the Project
 
-### Prerequisites
-- Docker Engine with Docker Compose v2
-- Java 21 (JDK) and Maven 3.9+ (for local Java development)
+## Prerequisites
+
+The easiest way to run the complete project is with Docker.
+
+Install:
+
 - Git
+- Docker
+- Docker Compose v2
 
-### Running with Docker Compose
+For direct Java development, also install:
+
+- JDK 21
+- Maven 3.9+
+
+---
+
+## 1. Clone the Repository
 
 ```bash
-git clone https://github.com/tanmay-alpha/automated-code-review-tool.git
-cd automated-code-review-tool
+git clone https://github.com/tanmay-alpha/reviewforge-java.git
+cd reviewforge-java
+```
+
+---
+
+## 2. Create the Environment File
+
+Copy the example configuration:
+
+### Linux / macOS
+
+```bash
 cp .env.example .env
+```
+
+### Windows PowerShell
+
+```powershell
+Copy-Item .env.example .env
+```
+
+The supplied configuration is suitable for local development.
+
+For GitHub OAuth or live GitHub repository integration, replace the following values in `.env` with credentials from your own GitHub OAuth application:
+
+```env
+GITHUB_CLIENT_ID=change-me
+GITHUB_CLIENT_SECRET=change-me
+```
+
+Do not commit the `.env` file.
+
+The default project configuration uses:
+
+```env
+MODEL_NAME=none
+```
+
+so the system can run using the deterministic fallback detector without downloading a model checkpoint.
+
+---
+
+## 3. Start the Complete Application
+
+From the repository root:
+
+```bash
 docker compose --env-file .env -f infra/docker-compose.yml up --build
 ```
 
-Local endpoints:
-- Dashboard: `http://localhost:3000`
-- Java API Health: `http://localhost:8080/actuator/health`
-- ML Worker Health: `http://localhost:8000/ml/health`
+Docker Compose starts:
 
-To stop services:
+| Service | Address |
+|---|---|
+| Web Dashboard | http://localhost:3000 |
+| Java Spring Boot API | http://localhost:8080 |
+| API Health Check | http://localhost:8080/actuator/health |
+| FastAPI Worker | http://localhost:8000 |
+| ML Worker Health | http://localhost:8000/ml/health |
+| PostgreSQL | localhost:5432 |
+| Redis | localhost:6379 |
+
+The first build may take several minutes because dependencies and Docker images need to be downloaded.
+
+---
+
+## 4. Verify the Application
+
+Check the Java backend:
+
+```bash
+curl http://localhost:8080/actuator/health
+```
+
+Expected response:
+
+```json
+{"status":"UP"}
+```
+
+Check the analysis worker:
+
+```bash
+curl http://localhost:8000/ml/health
+```
+
+The web dashboard can then be opened at:
+
+```text
+http://localhost:3000
+```
+
+---
+
+## 5. Stop the Application
+
 ```bash
 docker compose --env-file .env -f infra/docker-compose.yml down
 ```
 
----
-
-## Verification & Testing
-
-Run all commands from the repository root unless a `cd` is noted:
+To also remove local Docker volumes:
 
 ```bash
-# 1. Java API (Maven + JUnit 5)
-cd apps/api
-mvn -B -ntp test
-# Optional: PostgreSQL Testcontainers correctness suite (requires Docker)
-mvn -B -ntp -Ppostgres-correctness test
-
-# 2. Python ML Worker
-cd ../ml-worker
-ruff check app training tests
-mypy app training
-pytest -m "not slow" -q
-
-# 3. Next.js Web Frontend
-cd ../web
-npm ci
-npx tsc --noEmit
-npm test
-npm run build
-
-# 4. GitHub Action
-cd ../../github-action
-npm ci
-npm test
-npm run build
-git diff --exit-code -- dist
-
-# 5. VS Code Extension
-cd ../apps/vscode-ext
-npm ci
-npm run compile
-npm test
-
-# 6. Container Builds (Context: Repository Root)
-cd ../..
-docker compose --env-file .env.example -f infra/docker-compose.yml config
-docker build -f apps/api/Dockerfile -t automated-code-review-tool-api:local .
-docker build -f apps/ml-worker/Dockerfile -t automated-code-review-tool-ml:local .
-docker build -f apps/web/Dockerfile -t automated-code-review-tool-web:local apps/web
+docker compose --env-file .env -f infra/docker-compose.yml down -v
 ```
 
 ---
 
-## Security & Data Integrity
+# Java Backend
 
-- Never commit `.env`, private keys, secrets, or model checkpoint weights to source control.
-- All code samples undergo secret redaction before ML processing or persistence.
-- Sensitive credentials (GitHub tokens, encryption keys, webhook secrets) are strictly isolated via environment variables.
+The main Java project follows the standard Maven/Spring Boot layout:
+
+```text
+apps/api/
+├── pom.xml
+└── src/
+    ├── main/
+    │   ├── java/com/automatedcodereviewtool/
+    │   └── resources/
+    └── test/
+        ├── java/com/automatedcodereviewtool/
+        └── resources/
+```
+
+Important Java packages include:
+
+| Package | Purpose |
+|---|---|
+| `config` | Spring and application configuration |
+| `controller` | REST API endpoints |
+| `dto` | Request and response objects |
+| `entity` | JPA database entities |
+| `repository` | Spring Data JPA repositories |
+| `service` | Core business logic |
+| `security` | JWT, API keys and security filters |
+| `webhook` | GitHub webhook processing |
+| `exception` | Error handling |
+
+The general backend flow is:
+
+```text
+Controller
+    ↓
+Service
+    ↓
+Repository
+    ↓
+PostgreSQL
+```
+
+For code review:
+
+```text
+GitHub
+   ↓
+Spring Boot API
+   ↓
+FastAPI Analysis Worker
+   ↓
+Review Findings
+   ↓
+PostgreSQL / GitHub
+```
 
 ---
 
-## License
+# Running Java Tests
 
-[MIT](LICENSE) © 2026 Tanmay Mangal.
+Java tests can be executed entirely from the command line.
+
+```bash
+cd apps/api
+mvn -B -ntp test
+```
+
+This runs the Java unit, controller, service and integration tests configured for the normal test profile.
+
+For PostgreSQL-specific correctness tests, Docker must be running:
+
+```bash
+mvn -B -ntp -Ppostgres-correctness test
+```
+
+These tests use Testcontainers with PostgreSQL.
+
+---
+
+# Build the Java API Container
+
+From the repository root:
+
+```bash
+docker build -f apps/api/Dockerfile -t reviewforge-java-api .
+```
+
+The repository root is used as the Docker build context because the Java tests also use shared fixtures from:
+
+```text
+contracts/
+```
+
+---
+
+# Other Component Tests
+
+## ML Worker
+
+```bash
+cd apps/ml-worker
+pip install -r requirements.txt
+pytest -m "not slow" -q
+```
+
+## Web Dashboard
+
+```bash
+cd apps/web
+npm install
+npm test
+npm run build
+```
+
+## GitHub Action
+
+```bash
+cd github-action
+npm install
+npm test
+npm run build
+```
+
+## VS Code Extension
+
+```bash
+cd apps/vscode-ext
+npm install
+npm run compile
+npm test
+```
+
+---
+
+# Core Features
+
+- GitHub OAuth authentication
+- JWT-based user authentication
+- API-key authentication
+- Repository connection and management
+- GitHub webhook verification
+- Pull-request diff processing
+- Automated code-review workflow
+- Anti-pattern detection
+- Quality-score generation
+- Persistent review results using PostgreSQL
+- Redis-backed application state
+- Rule-based fallback analysis
+- Optional CodeBERT-compatible inference pipeline
+- Next.js review dashboard
+- GitHub Action integration
+- VS Code editor integration
+
+---
+
+# Security
+
+The backend includes:
+
+- Spring Security
+- JWT access and refresh tokens
+- API-key authentication
+- GitHub OAuth state validation
+- HMAC verification for GitHub webhooks
+- Request-size limits
+- Rate limiting
+- Repository ownership checks
+- Secret redaction before analysis
+- Environment-based sensitive configuration
+
+Secrets should never be committed to Git.
+
+Always keep real credentials in `.env` or deployment environment variables.
+
+---
+
+# Environment Configuration
+
+Important variables are documented in `.env.example`.
+
+Examples include:
+
+```env
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+
+JWT_SECRET=
+ENCRYPTION_KEY=
+
+ML_WORKER_SECRET=
+ML_WORKER_URL=http://localhost:8000
+
+MODEL_NAME=none
+
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8080
+FRONTEND_URL=http://localhost:3000
+APP_BASE_URL=http://localhost:8080
+
+SPRING_DATASOURCE_URL=
+SPRING_DATASOURCE_USERNAME=
+SPRING_DATASOURCE_PASSWORD=
+
+REDIS_PASSWORD=
+```
+
+For a normal local Docker run, start by copying `.env.example` to `.env`.
+
+---
+
+# Troubleshooting
+
+### `java` or `mvn` is not recognized
+
+Install JDK 21 and Maven, and configure `JAVA_HOME`.
+
+Alternatively, run the complete application using Docker Compose without installing Java locally.
+
+### Port already in use
+
+Make sure ports:
+
+```text
+3000
+5432
+6379
+8000
+8080
+```
+
+are not already occupied by another application.
+
+### GitHub login does not work
+
+Add valid GitHub OAuth credentials to `.env`:
+
+```env
+GITHUB_CLIENT_ID=...
+GITHUB_CLIENT_SECRET=...
+```
+
+### CodeBERT checkpoint is unavailable
+
+The project can operate without a model checkpoint.
+
+Keep:
+
+```env
+MODEL_NAME=none
+```
+
+to use deterministic fallback detection.
+
+---
+
+# License
+
+This project is licensed under the MIT License.
+
+See [LICENSE](LICENSE) for details.
