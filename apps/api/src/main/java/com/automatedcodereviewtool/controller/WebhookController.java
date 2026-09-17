@@ -1,0 +1,145 @@
+package com.automatedcodereviewtool.controller;
+
+import com.automatedcodereviewtool.service.WebhookService;
+import com.automatedcodereviewtool.webhook.GitHubWebhookEvent;
+import com.automatedcodereviewtool.webhook.HmacVerificationException;
+import com.automatedcodereviewtool.logging.SecurityEventLogger;
+import com.automatedcodereviewtool.webhook.HmacVerifier;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.Set;
+
+/**
+ * Endpoint that receives GitHub {@code pull_request} webhooks.
+ *
+ * <p>Forged signatures are rejected and durability failures return 503 so
+ * GitHub can redeliver. Pings and uninteresting actions return 200.</p>
+ */
+@RestController
+@RequestMapping("/api/webhook")
+public class WebhookController {
+
+    private static final Logger log = LoggerFactory.getLogger(WebhookController.class);
+    private static final String EVENT_PULL_REQUEST = "pull_request";
+
+    private static final Set<String> PROCESSED_ACTIONS =
+            Set.of("opened", "synchronize", "reopened");
+
+    private final HmacVerifier hmacVerifier;
+    private final WebhookService webhookService;
+    private final ObjectMapper objectMapper;
+
+    @Autowired
+    private SecurityEventLogger securityEventLogger;
+
+    public WebhookController(HmacVerifier hmacVerifier,
+                             WebhookService webhookService,
+                             ObjectMapper objectMapper) {
+        this.hmacVerifier = hmacVerifier;
+        this.webhookService = webhookService;
+        this.objectMapper = objectMapper;
+    }
+
+    @PostMapping("/github")
+    public ResponseEntity<Void> handle(
+            HttpServletRequest request,
+            @RequestHeader(value = "X-Hub-Signature-256", required = false) String signature,
+            @RequestHeader(value = "X-GitHub-Event", required = false) String event,
+            @RequestHeader(value = "X-GitHub-Delivery", required = false) String deliveryId,
+            @RequestBody String payload) {
+
+        if (payload != null && payload.length() > 1_048_576) {
+            log.warn("Payload size exceeds maximum allowed 1MB limit; length={}", payload.length());
+            return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).build();
+        }
+
+        if (deliveryId == null || deliveryId.isBlank()) {
+            // A blank delivery-id means we can't dedupe — treat as
+            // a malformed request rather than silently processing.
+            return ResponseEntity.badRequest().build();
+        }
+
+        // 1. Event filter: only process pull_request.
+        if (!EVENT_PULL_REQUEST.equals(event)) {
+            return ResponseEntity.ok().build();
+        }
+
+        // 2. Parse just enough to find the repo id and PR action.
+        GitHubWebhookEvent body;
+        try {
+            body = objectMapper.readValue(payload, GitHubWebhookEvent.class);
+        } catch (Exception ex) {
+            log.warn("Failed to parse webhook payload: {}", ex.getMessage());
+            return ResponseEntity.ok().build();
+        }
+        if (body.repository() == null || body.repository().id() == null) {
+            return ResponseEntity.ok().build();
+        }
+
+        String ip = request.getRemoteAddr();
+        if (ip == null || ip.isBlank()) {
+            ip = "unknown";
+        }
+
+        // 3. HMAC: must match the secret we stored when installing the hook.
+        //    An "unknown repo" (no secret on file) is a 200 — not our hook.
+        try {
+            if (!hmacVerifier.verify(payload, signature, body.repository().id().toString())) {
+                if (securityEventLogger != null) {
+                    securityEventLogger.logWebhookSecurityEvent(
+                        body.repository().id().toString(),
+                        false,
+                        ip,
+                        body.action()
+                    );
+                }
+                return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
+            }
+            if (securityEventLogger != null) {
+                securityEventLogger.logWebhookSecurityEvent(
+                    body.repository().id().toString(),
+                    true,
+                    ip,
+                    body.action()
+                );
+            }
+        } catch (HmacVerificationException ex) {
+            log.debug("Ignoring webhook for unknown repo: {}", ex.getMessage());
+            return ResponseEntity.ok().build();
+        }
+
+        // Only opened / synchronize / reopened produce a review.
+        if (!PROCESSED_ACTIONS.contains(body.action())) {
+            return ResponseEntity.ok().build();
+        }
+
+        // Commit durable delivery state before acknowledging GitHub.
+        boolean accepted;
+        try {
+            accepted = webhookService.receiveDelivery(
+                    deliveryId, body, body.repository().id());
+        } catch (Exception ex) {
+            log.error("Failed to durably accept delivery {}: {}", deliveryId, ex.getMessage());
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build();
+        }
+
+        if (!accepted) {
+            return ResponseEntity.ok().build();
+        }
+
+        webhookService.processAsync(deliveryId);
+
+        return ResponseEntity.ok().build();
+    }
+}

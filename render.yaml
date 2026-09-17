@@ -1,0 +1,103 @@
+databases:
+  - name: automated-code-review-tool-db
+    plan: basic-256mb
+    region: oregon
+    postgresMajorVersion: "16"
+    databaseName: automated_code_review_tool
+    user: automated_code_review_tool
+    diskSizeGB: 15
+    ipAllowList: []
+
+services:
+  - type: keyvalue
+    name: automated-code-review-tool-redis
+    plan: starter
+    region: oregon
+    ipAllowList: []
+    maxmemoryPolicy: allkeys-lru
+
+  - type: web
+    name: automated-code-review-tool-ml-worker
+    runtime: docker
+    plan: standard
+    region: oregon
+    dockerfilePath: apps/ml-worker/Dockerfile
+    dockerContext: .
+    healthCheckPath: /ml/health
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: MODEL_NAME
+        value: none
+      - key: ML_WORKER_SECRET
+        generateValue: true
+      - key: PYTHONUNBUFFERED
+        value: "1"
+
+  - type: web
+    name: automated-code-review-tool-api
+    runtime: docker
+    plan: standard
+    region: oregon
+    dockerfilePath: apps/api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /actuator/health
+    autoDeployTrigger: checksPass
+    envVars:
+      # Render exposes a postgresql:// connection string, while Spring expects
+      # a jdbc:postgresql:// URL. Set this to the database's internal JDBC URL.
+      - key: SPRING_DATASOURCE_URL
+        sync: false
+      - key: SPRING_DATASOURCE_USERNAME
+        fromDatabase:
+          name: automated-code-review-tool-db
+          property: user
+      - key: SPRING_DATASOURCE_PASSWORD
+        fromDatabase:
+          name: automated-code-review-tool-db
+          property: password
+      - key: SPRING_DATA_REDIS_URL
+        fromService:
+          type: keyvalue
+          name: automated-code-review-tool-redis
+          property: connectionString
+      - key: ML_WORKER_URL
+        value: http://automated-code-review-tool-ml-worker:8000
+      - key: ML_WORKER_SECRET
+        fromService:
+          type: web
+          name: automated-code-review-tool-ml-worker
+          envVarKey: ML_WORKER_SECRET
+      - key: APP_BASE_URL
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: WEBHOOK_CALLBACK_URL
+        sync: false
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ENCRYPTION_KEY
+        generateValue: true
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: API_KEY_RPM
+        value: "60"
+      - key: JAVA_TOOL_OPTIONS
+        value: -XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0
+
+  - type: web
+    name: automated-code-review-tool-web
+    runtime: docker
+    plan: starter
+    region: oregon
+    dockerfilePath: apps/web/Dockerfile
+    dockerContext: apps/web
+    healthCheckPath: /
+    autoDeployTrigger: checksPass
+    envVars:
+      # NEXT_PUBLIC_* is embedded in the browser bundle during the Docker build.
+      - key: NEXT_PUBLIC_API_BASE_URL
+        sync: false

@@ -1,0 +1,30 @@
+# =====================================================
+# automated-code-review-tool — ml-worker runtime dependencies (inference)
+# =====================================================
+# Used by apps/ml-worker/Dockerfile and local inference runs.
+# Training-only extras live in requirements-train.txt.
+#
+# Versions are pinned so local checks and the inference image are reproducible.
+# =====================================================
+
+# --- Web framework ---
+fastapi==0.138.0
+uvicorn[standard]==0.49.0
+
+# --- ML core (CodeBERT inference) ---
+torch==2.12.1
+transformers==5.12.1
+
+# --- Numerics ---
+numpy==2.4.6
+
+# --- Schemas + config ---
+pydantic==2.13.4
+pydantic-settings==2.14.2
+python-dotenv==1.2.2
+
+# --- Canonical taxonomy loader ---
+# Pinned explicitly — the runtime depends on this exact version, not a
+# transitive install. Without this line the worker would fail to load
+# `taxonomy/anti_patterns.yaml` and health would report `degraded`.
+PyYAML==6.0.3

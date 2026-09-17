@@ -1,0 +1,77 @@
+name: ci-api
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/api/**"
+      - "taxonomy/**"
+      - "contracts/**"
+      - ".github/workflows/ci-api.yml"
+  pull_request:
+    paths:
+      - "apps/api/**"
+      - "taxonomy/**"
+      - "contracts/**"
+      - ".github/workflows/ci-api.yml"
+
+concurrency:
+  group: ci-api-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JWT_SECRET: ci-only-jwt-signing-key-with-at-least-32-characters
+  ENCRYPTION_KEY: bG9jYWwtZGV2LWVuY3J5cHRpb24ta2V5LTMyYnl0ZXM=
+  ML_WORKER_URL: http://localhost:8000
+  ML_WORKER_SECRET: ci-only-ml-worker-secret
+  GITHUB_CLIENT_ID: ci-client-id
+  GITHUB_CLIENT_SECRET: ci-client-secret
+
+jobs:
+  unit-and-slice-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Run API tests
+        working-directory: apps/api
+        run: mvn -B -ntp test
+      - name: Upload Surefire reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-surefire-reports
+          path: apps/api/target/surefire-reports
+          if-no-files-found: ignore
+
+  postgres-correctness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Run PostgreSQL Testcontainers correctness tests
+        working-directory: apps/api
+        run: mvn -B -ntp -Ppostgres-correctness test
+      - name: Upload PostgreSQL test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-postgres-surefire-reports
+          path: apps/api/target/surefire-reports
+          if-no-files-found: ignore
+
+  docker-build:
+    needs: [unit-and-slice-tests, postgres-correctness]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build API image
+        run: docker build -f apps/api/Dockerfile -t automated-code-review-tool-api:ci .

@@ -1,0 +1,101 @@
+/**
+ * automated-code-review-tool — VS Code extension entry point.
+ *
+ * Loaded by VS Code when one of the activationEvents in
+ * package.json fires (any of the supported languages is opened).
+ *
+ * Responsibilities:
+ *   - Create the `automated-code-review-tool` DiagnosticCollection so findings can
+ *     be displayed as inline squigglies in the editor.
+ *   - Auto-scan any saved file whose language is supported.
+ *   - Provide a manual "Scan Current File" command.
+ *   - Clean up subscriptions and the status bar on deactivation.
+ */
+import * as vscode from "vscode";
+import { clearAll, scanFile } from "./reviewer";
+import { scanOnSave } from "./config";
+
+/** Languages the automated-code-review-tool backend currently understands. */
+const SUPPORTED_LANGUAGES = new Set<string>([
+  "python",
+  "javascript",
+  "javascriptreact",
+  "typescript",
+  "typescriptreact",
+  "java",
+]);
+
+/**
+ * Called by VS Code when the extension activates. The context
+ * holds the disposables so they can be cleaned up on deactivation.
+ */
+export function activate(context: vscode.ExtensionContext): void {
+  // Single shared collection — squigglies across the editor surface.
+  const diagnosticCollection = vscode.languages.createDiagnosticCollection(
+    "automated-code-review-tool",
+  );
+  context.subscriptions.push(diagnosticCollection);
+
+  // Auto-scan on save (only supported languages).
+  context.subscriptions.push(
+    vscode.workspace.onDidSaveTextDocument(async (doc) => {
+      if (!SUPPORTED_LANGUAGES.has(doc.languageId)) return;
+      if (!scanOnSave()) return;
+      await scanFile(doc, diagnosticCollection);
+    }),
+  );
+
+  // Manual scan command — runs even if the auto-scan is off.
+  context.subscriptions.push(
+    vscode.commands.registerCommand("automated-code-review-tool.scanFile", async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        void vscode.window.showInformationMessage(
+          "automated-code-review-tool: open a file to scan.",
+        );
+        return;
+      }
+      await scanFile(editor.document, diagnosticCollection);
+    }),
+  );
+
+  // Workspace scan command advertised in package.json.
+  context.subscriptions.push(
+    vscode.commands.registerCommand("automated-code-review-tool.scanWorkspace", async () => {
+      const files = await vscode.workspace.findFiles(
+        "**/*.{py,js,jsx,ts,tsx,java}",
+        "**/{.git,node_modules,out,dist,build}/**",
+      );
+      for (const uri of files) {
+        const doc = await vscode.workspace.openTextDocument(uri);
+        if (SUPPORTED_LANGUAGES.has(doc.languageId)) {
+          await scanFile(doc, diagnosticCollection);
+        }
+      }
+      void vscode.window.showInformationMessage(
+        `automated-code-review-tool: scanned ${files.length} workspace file${files.length === 1 ? "" : "s"}.`,
+      );
+    }),
+  );
+
+  // Clear command — useful when reviewing fixes.
+  context.subscriptions.push(
+    vscode.commands.registerCommand("automated-code-review-tool.clear", () => {
+      clearAll(diagnosticCollection);
+    }),
+  );
+
+  // Status bar message on first activation.
+  void vscode.window.showInformationMessage(
+    "automated-code-review-tool is active. Save any supported file to scan it.",
+  );
+}
+
+/**
+ * Called by VS Code on extension uninstall / window reload. The
+ * context disposes its own subscriptions; we just need to make
+ * sure the diagnostic collection is cleared.
+ */
+export function deactivate(): void {
+  // Disposables are cleaned up by VS Code. Nothing to do here.
+}

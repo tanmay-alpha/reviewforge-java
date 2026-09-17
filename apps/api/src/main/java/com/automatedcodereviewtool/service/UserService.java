@@ -1,0 +1,100 @@
+package com.automatedcodereviewtool.service;
+
+import com.automatedcodereviewtool.dto.GitHubUserInfo;
+import com.automatedcodereviewtool.entity.User;
+import com.automatedcodereviewtool.repository.UserRepository;
+import com.automatedcodereviewtool.security.EncryptionService;
+import com.automatedcodereviewtool.service.ApiKeyService;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.security.SecureRandom;
+import java.util.Optional;
+import java.util.UUID;
+
+/**
+ * Application service over the {@code users} table.
+ *
+ * <p>{@link #findOrCreateFromGitHub(GitHubUserInfo, String)} is called from
+ * the OAuth callback. It upserts the user row and AES-encrypts the GitHub
+ * access token before storing it.</p>
+ *
+ * <p>{@link #generateApiKey(UUID)} mints a fresh {@code cl_live_<hex>}, hashes
+ * it with BCrypt, stores the prefix for display + lookup, and returns the
+ * raw key — the user only ever sees it once.</p>
+ */
+@Service
+public class UserService {
+
+    static final String API_KEY_PREFIX = "cl_live_";
+    private static final int API_KEY_HEX_LEN = 32;
+
+    private final UserRepository userRepository;
+    private final EncryptionService encryptionService;
+    private final PasswordEncoder passwordEncoder;
+    private final ApiKeyService apiKeyService;
+    private final SecureRandom random = new SecureRandom();
+
+    public UserService(UserRepository userRepository,
+                       EncryptionService encryptionService,
+                       PasswordEncoder passwordEncoder,
+                       ApiKeyService apiKeyService) {
+        this.userRepository = userRepository;
+        this.encryptionService = encryptionService;
+        this.passwordEncoder = passwordEncoder;
+        this.apiKeyService = apiKeyService;
+    }
+
+    @Transactional
+    public User findOrCreateFromGitHub(GitHubUserInfo info, String accessToken) {
+        String encrypted = encryptionService.encrypt(accessToken);
+        return userRepository.findByGithubId(info.id())
+                .map(existing -> {
+                    existing.setAccessToken(encrypted);
+                    existing.setGithubUsername(info.login());
+                    existing.setAvatarUrl(info.avatarUrl());
+                    return userRepository.save(existing);
+                })
+                .orElseGet(() -> userRepository.save(User.builder()
+                        .githubId(info.id())
+                        .githubUsername(info.login())
+                        .avatarUrl(info.avatarUrl())
+                        .accessToken(encrypted)
+                        .build()));
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<User> findById(UUID id) {
+        return userRepository.findById(id);
+    }
+
+    /**
+     * Generate a new API key for the user. Returns the raw key — the caller
+     * must show it to the user once and then forget it.
+     *
+     * <p>Delegates to {@link ApiKeyService#createKey(com.automatedcodereviewtool.entity.User, String)}
+     * so all keys live in the dedicated {@code api_keys} table. The legacy
+     * {@code users.api_key_hash} / {@code users.api_key_prefix} columns are
+     * read-only and retained for backward compatibility only.</p>
+     */
+    @Transactional
+    public String generateApiKey(UUID userId) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new IllegalArgumentException("user not found: " + userId));
+        // Delegate to ApiKeyService — keys are now managed via the api_keys table.
+        ApiKeyService.CreatedApiKey created = apiKeyService.createKey(user, "generated-by-user-service");
+        return created.plaintext();
+    }
+
+    private String randomHex(int hexChars) {
+        byte[] bytes = new byte[(hexChars + 1) / 2];
+        random.nextBytes(bytes);
+        StringBuilder sb = new StringBuilder(hexChars);
+        for (byte b : bytes) {
+            sb.append(String.format("%02x", b));
+        }
+        // In case rounding produced one extra char (odd hexChars), trim.
+        return sb.substring(0, hexChars);
+    }
+}

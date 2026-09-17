@@ -1,0 +1,130 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-automated-code-review-tool}
+      POSTGRES_USER: ${POSTGRES_USER:-automated-code-review-tool}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-automated-code-review-tool_local}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../scripts/seed-db.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --requirepass
+      - ${REDIS_PASSWORD:-automated-code-review-tool_local}
+      - --bind
+      - 0.0.0.0
+      - --protected-mode
+      - "yes"
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-automated-code-review-tool_local}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  ml-worker:
+    build:
+      context: ..
+      dockerfile: apps/ml-worker/Dockerfile
+    environment:
+      MODEL_NAME: ${MODEL_NAME:-none}
+      HF_TOKEN: ${HF_TOKEN:-}
+      ML_WORKER_SECRET: ${ML_WORKER_SECRET:-local-ml-worker-secret-change-me}
+      HF_HOME: /home/automated-code-review-tool/.cache/huggingface
+    ports:
+      - "8000:8000"
+    volumes:
+      - hf_cache:/home/automated-code-review-tool/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/ml/health', timeout=2).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-automated-code-review-tool}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-automated-code-review-tool}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-automated-code-review-tool_local}
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: "6379"
+      SPRING_REDIS_PASSWORD: ${REDIS_PASSWORD:-automated-code-review-tool_local}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-local-github-client-id}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-local-github-client-secret}
+      JWT_SECRET: ${JWT_SECRET:-local-only-jwt-secret-change-before-sharing}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-bG9jYWwtZGV2LWVuY3J5cHRpb24ta2V5LTMyYnl0ZXM=}
+      ML_WORKER_URL: http://ml-worker:8000
+      ML_WORKER_SECRET: ${ML_WORKER_SECRET:-local-ml-worker-secret-change-me}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      COOKIE_SECURE: "false"
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
+      WEBHOOK_CALLBACK_URL: ${WEBHOOK_CALLBACK_URL:-http://localhost:8080/api/webhook/github}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ml-worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  web:
+    build:
+      context: ../apps/web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+    environment:
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  postgres_data:
+  hf_cache:

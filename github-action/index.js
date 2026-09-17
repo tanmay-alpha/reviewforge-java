@@ -1,0 +1,203 @@
+/**
+ * automated-code-review-tool GitHub Action entrypoint.
+ *
+ * Fetches the pull-request diff, submits it to the ad-hoc file scan API,
+ * emits annotations and outputs, and enforces the configured quality gate.
+ */
+
+import * as core from '@actions/core';
+import * as github from '@actions/github';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/** @typedef {{id?:string,antiPattern:string,severity:string,confidence:number,explanation:string,filePath?:string,lineStart?:number|null,lineEnd?:number|null,category?:string}} FindingDto */
+
+async function run(deps = {}) {
+  const coreApi = deps.core || core;
+  const githubApi = deps.github || github;
+  const fetchApi = deps.fetch || fetch;
+
+  try {
+    const apiUrl = (coreApi.getInput('api-url') || '').trim().replace(/\/+$/, '');
+    const apiKey = (coreApi.getInput('api-key') || '').trim();
+    const githubToken = (coreApi.getInput('github-token') || '').trim();
+    const language = (coreApi.getInput('language') || 'python').trim();
+    const failThreshold = Number.parseInt(
+      coreApi.getInput('fail-threshold') || '60',
+      10,
+    );
+    // Configurable timeouts (ms) with sensible defaults.
+    const fetchTimeoutMs = Number.parseInt(
+      coreApi.getInput('fetch-timeout-ms') || '30000',
+      10,
+    );
+
+    if (!apiUrl) return coreApi.setFailed('Missing required input: api-url');
+    if (!apiKey) return coreApi.setFailed('Missing required input: api-key');
+    if (!githubToken) return coreApi.setFailed('Missing required input: github-token');
+    coreApi.setSecret?.(apiKey);
+    coreApi.setSecret?.(githubToken);
+    if (Number.isNaN(failThreshold) || failThreshold < 0 || failThreshold > 100) {
+      return coreApi.setFailed(
+        `Invalid fail-threshold: must be 0-100, got ${failThreshold}`,
+      );
+    }
+    if (
+      Number.isNaN(fetchTimeoutMs) ||
+      fetchTimeoutMs < 1000 ||
+      fetchTimeoutMs > 300000
+    ) {
+      return coreApi.setFailed(
+        `Invalid fetch-timeout-ms: must be 1000-300000, got ${fetchTimeoutMs}`,
+      );
+    }
+    // HTTPS-only — a CI secret in HTTP is exfiltration waiting to happen.
+    if (!/^https:\/\//i.test(apiUrl)) {
+      return coreApi.setFailed(
+        `api-url must use https:// (plain http is rejected for security); got: ${apiUrl}`,
+      );
+    }
+
+    const context = githubApi.context;
+    if (context.eventName !== 'pull_request') {
+      coreApi.info(
+        `Event is "${context.eventName}"; automated-code-review-tool only runs on pull_request. Skipping.`,
+      );
+      return;
+    }
+
+    const prNumber = context.payload.pull_request?.number;
+    if (!prNumber) {
+      return coreApi.setFailed('Could not read pull_request.number from event payload');
+    }
+
+    const repoFullName = `${context.repo.owner}/${context.repo.repo}`;
+    coreApi.info(
+      `automated-code-review-tool: scanning ${repoFullName}#${prNumber} (language=${language})`,
+    );
+
+    const octokit = githubApi.getOctokit(githubToken);
+    // Bound the GitHub diff fetch with the same timeout so we don't hang
+    // forever waiting on api.github.com.
+    const { data: diff } = await octokit.rest.pulls.get({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      pull_number: prNumber,
+      mediaType: { format: 'diff' },
+      request: { timeout: fetchTimeoutMs },
+    });
+    if (!diff || typeof diff !== 'string') {
+      coreApi.warning('Empty diff returned from GitHub; nothing to scan.');
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), fetchTimeoutMs);
+    const response = await fetchApi(`${apiUrl}/api/scan/file`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        content: diff,
+        language,
+        filePath: `${repoFullName}#${prNumber}`,
+      }),
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeoutId));
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      return coreApi.setFailed(
+        `automated-code-review-tool API returned HTTP ${response.status}: ${text.slice(0, 500)}`,
+      );
+    }
+
+    const result = await response.json();
+    /** @type {FindingDto[]} */
+    const findings = dedupeFindings(
+      Array.isArray(result.findings) ? result.findings : [],
+    );
+    const qualityScore =
+      typeof result.qualityScore === 'number' ? result.qualityScore : null;
+
+    let criticalCount = 0;
+    let majorCount = 0;
+    let minorCount = 0;
+    for (const finding of findings) {
+      const severity = (finding.severity || '').toLowerCase();
+      if (severity === 'critical') criticalCount++;
+      else if (severity === 'major') majorCount++;
+      else if (severity === 'minor') minorCount++;
+
+      const title = `${finding.antiPattern || 'Anti-pattern'} (${severity || 'unknown'})`;
+      const body = [
+        finding.explanation || '',
+        `confidence: ${Math.round((finding.confidence || 0) * 100)}%`,
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+      if (finding.lineStart && finding.filePath) {
+        const annotation = {
+          file: finding.filePath,
+          startLine: finding.lineStart,
+          endLine: finding.lineEnd || finding.lineStart,
+          title,
+        };
+        if (severity === 'critical') coreApi.error(body, annotation);
+        else if (severity === 'major') coreApi.warning(body, annotation);
+        else coreApi.notice(body, annotation);
+      } else if (severity === 'critical') {
+        coreApi.error(`${title}\n${body}`);
+      } else {
+        coreApi.warning(`${title}\n${body}`);
+      }
+    }
+
+    coreApi.setOutput('quality-score', qualityScore == null ? '' : String(qualityScore));
+    coreApi.setOutput('findings-count', String(findings.length));
+    coreApi.setOutput('critical-count', String(criticalCount));
+    coreApi.info(
+      [
+        `automated-code-review-tool complete: ${repoFullName}#${prNumber}`,
+        `Quality score: ${qualityScore == null ? 'n/a' : `${qualityScore}/100`}`,
+        `Findings: ${findings.length} total (${criticalCount} critical, ${majorCount} major, ${minorCount} minor)`,
+      ].join('\n'),
+    );
+
+    if (qualityScore != null && qualityScore < failThreshold) {
+      coreApi.setFailed(
+        `Quality score ${qualityScore}/100 is below threshold ${failThreshold}/100`,
+      );
+    }
+  } catch (err) {
+    coreApi.setFailed(err instanceof Error ? err.message : String(err));
+  }
+}
+
+function dedupeFindings(findings) {
+  const seen = new Set();
+  return findings.filter((finding) => {
+    const key = finding.id
+      ? `id:${finding.id}`
+      : [
+          finding.antiPattern || '',
+          finding.filePath || '',
+          finding.lineStart || '',
+          finding.lineEnd || '',
+          finding.explanation || '',
+        ].join('\u0000');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  void run();
+}
+
+export { dedupeFindings, run };

@@ -1,0 +1,98 @@
+{
+  "name": "automated-code-review-tool-reviewer",
+  "displayName": "automated-code-review-tool — Semantic Code Review",
+  "description": "Displays automated-code-review-tool API findings as editor diagnostics",
+  "version": "1.0.0",
+  "publisher": "tanmay-alpha",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tanmay-alpha/automated-code-review-tool.git",
+    "directory": "apps/vscode-ext"
+  },
+  "bugs": {
+    "url": "https://github.com/tanmay-alpha/automated-code-review-tool/issues"
+  },
+  "icon": "icon.png",
+  "keywords": [
+    "review",
+    "anti-pattern",
+    "static-analysis",
+    "quality"
+  ],
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Linters",
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:python",
+    "onLanguage:javascript",
+    "onLanguage:javascriptreact",
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "onLanguage:java"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "automated-code-review-tool.scanFile",
+        "title": "automated-code-review-tool: Scan Current File",
+        "category": "automated-code-review-tool"
+      },
+      {
+        "command": "automated-code-review-tool.scanWorkspace",
+        "title": "automated-code-review-tool: Scan All Files in Workspace",
+        "category": "automated-code-review-tool"
+      },
+      {
+        "command": "automated-code-review-tool.clear",
+        "title": "automated-code-review-tool: Clear Diagnostics",
+        "category": "automated-code-review-tool"
+      }
+    ],
+    "configuration": {
+      "title": "automated-code-review-tool",
+      "properties": {
+        "automated-code-review-tool.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Your automated-code-review-tool API key from the dashboard (Settings → API Key)",
+          "markdownDescription": "Your automated-code-review-tool API key from the dashboard (**Settings → API Key**). Required for the extension to contact the automated-code-review-tool API."
+        },
+        "automated-code-review-tool.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:8080",
+          "description": "automated-code-review-tool API base URL"
+        },
+        "automated-code-review-tool.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable/disable auto-scan on save"
+        },
+        "automated-code-review-tool.scanOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Scan files automatically when saved"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "package": "vsce package --no-dependencies",
+    "watch": "tsc -watch -p ./",
+    "lint": "tsc -p ./ --noEmit",
+    "test": "npm run compile && node --test test/*.test.cjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.9.2",
+    "typescript": "^5.4.5"
+  }
+}

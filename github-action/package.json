@@ -1,0 +1,30 @@
+{
+  "name": "automated-code-review-tool-action",
+  "version": "1.0.0",
+  "description": "GitHub Action for pull-request analysis via the automated-code-review-tool API",
+  "main": "index.js",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node index.js",
+    "build": "ncc build index.js -o dist --minify --license licenses.txt",
+    "test": "node --test test/smoke.test.cjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@actions/core": "^3.0.1",
+    "@actions/github": "^9.1.1"
+  },
+  "keywords": [
+    "code-review",
+    "static-analysis",
+    "anti-patterns",
+    "automated-code-review-tool"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@vercel/ncc": "^0.44.0"
+  }
+}

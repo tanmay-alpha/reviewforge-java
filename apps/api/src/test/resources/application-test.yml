@@ -1,0 +1,58 @@
+# Test profile — used by @SpringBootTest integration tests.
+# Replaces PostgreSQL with H2 in PostgreSQL-compatibility mode so
+# the Flyway migrations run without modification.
+
+spring:
+  datasource:
+    url: jdbc:h2:mem:automated-code-review-tool;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+        format_sql: true
+  flyway:
+    enabled: true
+    # Use the migration_h2/ folder for H2-compatible migrations
+    # to avoid path collision with Postgres db/migration.
+    locations: classpath:db/migration_h2
+  data:
+    redis:
+      host: localhost
+      port: 0  # disabled — tests that need Redis inject a mock
+management:
+  health:
+    redis:
+      enabled: false
+
+app:
+  jwt:
+    secret: test-secret-key-32-bytes-long-for-hs256-min
+    access-token-expiry: 900
+    refresh-token-expiry: 604800
+  request:
+    max-body-size: 5000
+    max-query-size: 4096
+    max-header-size: 4096
+  webhook:
+    callback-url: http://localhost:8080/api/webhook/github
+  ratelimit:
+    api-key:
+      requests-per-minute: 60
+  encryption:
+    # 32-byte test key, base64-encoded. AES-256-GCM needs 32 raw bytes;
+    # EncryptionService#init() decodes this in base64 mode. This is a
+    # throwaway test value — it only exists to satisfy @Value injection
+    # in the test ApplicationContext. The decoded bytes are 0x01..0x20.
+    key: AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=
+  github:
+    client-id: test-client-id
+    client-secret: test-client-secret
+    oauth-redirect-uri: http://localhost:8080/api/auth/callback
+  ml-worker:
+    url: http://localhost:0
+    secret: test-ml-secret
